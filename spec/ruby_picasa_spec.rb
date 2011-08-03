@@ -4,7 +4,7 @@ class Picasa
   class << self
     public :parse_url
   end
-  public :auth_header, :with_cache, :class_from_xml, :xml_data
+  public :with_cache, :class_from_xml, :xml_data
 end
 
 describe 'Picasa class methods' do

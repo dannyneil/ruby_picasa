@@ -6,7 +6,7 @@ require 'net/https'
 require File.join(File.dirname(__FILE__), 'ruby_picasa/types')
 
 module RubyPicasa
-  VERSION = '0.2.2'
+  VERSION = '0.2.3'
 
   class PicasaError < StandardError
   end
@@ -17,75 +17,58 @@ end
 
 # == Authorization
 #
-# RubyPicasa makes authorizing a Rails app easy. It is a two step process: 
+# Omniauth makes authorizing the OAuth system in Rails quite easy.  There's
+# two steps in the process (plus one first-time setup):
+# 
+# Step zero: register your application with Google to get your app_id and 
+# app_secret keys.
 #
-# First redirect the user to the authorization url, if the user authorizes your
-# application, Picasa will redirect the user back to the url you specify (in
-# this case authorize_picasa_url). 
+# 1. Redirect the user to the authorization url.  Now, if the user
+# authorizes the app, they will be redirected to the callback url.
 #
-# Next, pass the Rails request object to the authorize_token method which will
-# make the api call to upgrade the token and if successful return an initialized
-# Picasa session object ready to use. The token object can be retrieved from the
-# token attribute.
+# 2. Grab the OAuth token and secret from the omniauth session variable.
+# Using the four keys - app_id, app_secret, oauth_token, oauth_secret - you
+# can build your access token using.
 #
 #   class PicasaController < ApplicationController
-#     def request_authorization
-#       redirect_to Picasa.authorization_url(authorize_picasa_url)
-#     end
-#
-#     def authorize
-#       if Picasa.token_in_request?(request)
-#         begin
-#           picasa = Picasa.authorize_request(request)
-#           current_user.picasa_token = picasa.token
-#           current_user.save
-#           flash[:notice] = 'Picasa authorization complete'
-#           redirect_to picasa_path
-#         rescue PicasaTokenError => e
-#           # 
+#     def show     
+#       omniauth = request.env["omniauth.auth"] 
+#       if(omniauth['provider'] == "google")
+#         picasa = Picasa.oath_token_setup(APP_ID, 
+#                           APP_SECRET, 
+#                           omniauth['credentials']['token'], 
+#                           omniauth['credentials']['secret'])
+#         current_user.picasa_token = picasa.token
+#         current_user.save!
+#         flash[:notice] = "Picasa authorization complete"
+#         @first_photo = picasa.user.albums.first.photos.first
+#       end
+#       rescue PicasaTokenError => e
 #           @error = e.message
 #           render
-#         end
 #       end
 #     end
 #   end
 #
 class Picasa
   class << self
-    # The user must be redirected to this address to authorize the application
-    # to access their Picasa account. The token_from_request and
-    # authorize_request methods can be used to handle the resulting redirect
-    # from Picasa.
-    def authorization_url(return_to_url, request_session = true, secure = false, authsub_url = nil)
-      session = request_session ? '1' : '0'
-      secure = secure ? '1' : '0'
-      return_to_url = CGI.escape(return_to_url)
-      url = authsub_url || 'http://www.google.com/accounts/AuthSubRequest'
-      "#{ url }?scope=http%3A%2F%2F#{ host }%2Fdata%2F&session=#{ session }&secure=#{ secure }&next=#{ return_to_url }"
+    # Obtain an access token from the oauth token and oauth token secret.
+    def prepare_access_token(app_id, app_secret, oauth_token, oauth_token_secret)
+      consumer = OAuth::Consumer.new(app_id, app_secret,
+        { :site => Picasa.host,
+          :scheme => :header
+        })
+      token_hash = { :oauth_token => oauth_token,
+                     :oauth_token_secret => oauth_token_secret
+                   }
+      access_token = OAuth::AccessToken.from_hash(consumer, token_hash )
+      return access_token
     end
 
-    # Takes a Rails request object and extracts the token from it. This would
-    # happen in the action that is pointed to by the return_to_url argument
-    # when the authorization_url is created.
-    def token_from_request(request)
-      if token = request.parameters['token']
-        return token
-      else
-        raise RubyPicasa::PicasaTokenError, 'No Picasa authorization token was found.'
-      end
-    end
-
-    def token_in_request?(request)
-      request.parameters['token']
-    end
-
-    # Takes a Rails request object as in token_from_request, then makes the
-    # token authorization request to produce the permanent token. This will
-    # only work if request_session was true when you created the
-    # authorization_url.
-    def authorize_request(request)
-      p = Picasa.new(token_from_request(request))
-      p.authorize_token!
+    # Initialize the oauth process, and return a Picasa object to use.
+    def oauth_token_setup(app_id, app_secret, oauth_token, oauth_token_secret)
+      p = Picasa.new
+      p.token = Picasa.prepare_access_token(app_id, app_secret, oauth_token, oauth_token_secret)
       p
     end
 
@@ -164,52 +147,36 @@ class Picasa
     end
 
     private
-
-    # Extract the path and a hash of key/value pairs from a given url with
-    # optional query string.
-    def parse_url(args)
-      url = args[:url]
-      url ||= args[:user_id] if is_url?(args[:user_id]) 
-      url ||= args[:album_id] if is_url?(args[:album_id])
-      if url
-        uri = URI.parse(url)
-        path = uri.path
-        options = {}
-        if uri.query
-          uri.query.split('&').each do |query|
-            k, v = query.split('=')
-            options[k] = CGI.unescape(v)
+      # Extract the path and a hash of key/value pairs from a given url with
+      # optional query string.
+      def parse_url(args)
+        url = args[:url]
+        url ||= args[:user_id] if is_url?(args[:user_id]) 
+        url ||= args[:album_id] if is_url?(args[:album_id])
+        if url
+          uri = URI.parse(url)
+          path = uri.path
+          options = {}
+          if uri.query
+            uri.query.split('&').each do |query|
+              k, v = query.split('=')
+              options[k] = CGI.unescape(v)
+            end
           end
+          [path, options]
+        else
+          [nil, {}]
         end
-        [path, options]
-      else
-        [nil, {}]
       end
-    end
   end
 
-  # The AuthSub token currently in use.
-  attr_reader :token
+  # The OAuth token currently in use.
+  attr_accessor :token
 
-  def initialize(token)
-    @token = token
+  def initialize()
     @request_cache = {}
   end
-
-  # Attempt to upgrade the current AuthSub token to a permanent one. This only
-  # works if the Picasa session is initialized with a single use token.
-  def authorize_token!
-    http = Net::HTTP.new("www.google.com", 443)
-    http.use_ssl = true
-    response = http.get('/accounts/accounts/AuthSubSessionToken', auth_header)
-    token = response.body.scan(/Token=(.*)/).flatten.compact.first
-    if token
-      @token = token
-    else
-      raise RubyPicasa::PicasaTokenError, 'The request to upgrade to a session token failed.'
-    end
-    @token
-  end
+  
 
   # Retrieve a RubyPicasa::User record including all user albums.
   def user(user_id_or_url = nil, options = {})
@@ -263,9 +230,9 @@ class Picasa
   # Returns the raw xml from Picasa. See the Picasa.path method for valid
   # options.
   def xml(options = {})
-    http = Net::HTTP.new(Picasa.host, 80)
-    path = Picasa.path(options)
-    response = http.get(path, auth_header)
+    path = "http://" + Picasa.host + Picasa.path(options)
+    puts "Contacting: #{path}"
+    response = token.request(:get, path)
     if response.code =~ /20[01]/
       response.body
     end
@@ -292,15 +259,6 @@ class Picasa
   def get(options = {})
     with_cache(options) do |xml|
       class_from_xml(xml)
-    end
-  end
-
-  # Returns the header data needed to make AuthSub requests.
-  def auth_header
-    if token
-      { "Authorization" => %{AuthSub token="#{ token }"} }
-    else
-      {}
     end
   end
 
